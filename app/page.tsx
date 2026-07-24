@@ -1,6 +1,9 @@
 import { Dashboard } from "@/components/dashboard";
-import { isoDateInNewYork } from "@/lib/date";
+import { resolveSlateDate } from "@/lib/mlb";
 
-export default function Page() {
-  return <Dashboard initialDate={isoDateInNewYork(1)} />;
+export const dynamic = "force-dynamic";
+
+export default async function Page() {
+  const date = await resolveSlateDate();
+  return <Dashboard initialDate={date} />;
 }

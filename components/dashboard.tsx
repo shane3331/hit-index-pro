@@ -12,8 +12,8 @@ const MODE_LABELS: Record<Mode, string> = {
 };
 
 const MODE_NOTES: Record<Mode, string> = {
-  conservative: "Elite confidence only, cross-game parlays with 50%+ combined probability.",
-  balanced: "Elite and Strong confidence, parlays with 44%+ combined probability.",
+  conservative: "Elite confidence only, cross-game parlays with 46%+ combined probability.",
+  balanced: "Elite and Strong confidence, parlays with 40%+ combined probability.",
   aggressive: "Every qualified play and every ranked parlay combination.",
 };
 
@@ -53,10 +53,10 @@ function hitterPasses(hitter: HitterProjection, mode: Mode): boolean {
 
 function parlayPasses(parlay: ParlayProjection, mode: Mode): boolean {
   if (mode === "conservative") {
-    return !parlay.sameGame && parlay.combinedProbability >= 0.5 && parlay.legs.every((leg) => leg.confidence === "Elite");
+    return !parlay.sameGame && parlay.combinedProbability >= 0.46 && parlay.legs.every((leg) => leg.confidence === "Elite");
   }
   if (mode === "balanced") {
-    return parlay.combinedProbability >= 0.44 && parlay.legs.every((leg) => leg.confidence === "Elite" || leg.confidence === "Strong");
+    return parlay.combinedProbability >= 0.4 && parlay.legs.every((leg) => leg.confidence === "Elite" || leg.confidence === "Strong");
   }
   return true;
 }
@@ -228,6 +228,9 @@ export function Dashboard({ initialDate }: { initialDate: string }) {
                     <span className={`status-pill status-${slate.source.weather}`}><i />Weather: {sourceLabel(slate.source.weather)}</span>
                     <span className={`status-pill status-${slate.source.odds}`}><i />Sportsbook: {sourceLabel(slate.source.odds)}</span>
                     <span className={`status-pill status-${slate.source.persistence}`}><i />Tracking: {sourceLabel(slate.source.persistence)}</span>
+                    <span className={`status-pill status-${slate.lineupStatus === "official" ? "live" : slate.lineupStatus === "none" ? "unavailable" : "partial"}`}>
+                      <i />Lineups: {slate.lineupStatus === "official" ? "Confirmed" : slate.lineupStatus === "mixed" ? "Part confirmed" : slate.lineupStatus === "projected" ? "Projected" : "Unavailable"}
+                    </span>
                     {building ? <span className="status-pill status-partial"><i />Model rebuilding in the background...</span> : null}
                   </>
                 ) : (
@@ -256,7 +259,7 @@ export function Dashboard({ initialDate }: { initialDate: string }) {
           <div className="kpi-grid">
             <div className="panel kpi"><span>Slate Generated</span><strong>{slate ? gameTime(slate.generatedAt) : "--"}</strong></div>
             <div className="panel kpi"><span>Hitters Modeled</span><strong>{slate?.hitters.length ?? "--"}</strong></div>
-            <div className="panel kpi"><span>Lineups Posted</span><strong>{slate ? (slate.hitters.some((hitter) => hitter.lineupSlot) ? "Yes" : "Pending") : "--"}</strong></div>
+            <div className="panel kpi"><span>Batting Orders</span><strong>{slate ? (slate.lineupStatus === "official" ? "Confirmed" : slate.lineupStatus === "mixed" ? "Part confirmed" : slate.lineupStatus === "projected" ? "Projected" : "Unavailable") : "--"}</strong></div>
             <div className="panel kpi"><span>Prop Markets</span><strong>{slate ? slate.hitters.filter((hitter) => hitter.market).length : "--"}</strong></div>
           </div>
 
@@ -364,7 +367,9 @@ export function Dashboard({ initialDate }: { initialDate: string }) {
                       <p>
                         {hitter.team} vs {hitter.opponent} · faces {hitter.starterName}
                         {hitter.starterHand ? ` (${hitter.starterHand}HP)` : ""}
-                        {hitter.lineupSlot ? ` · batting ${hitter.lineupSlot}` : " · lineup pending"}
+                        {hitter.lineupSlot
+                          ? ` · batting ${hitter.lineupSlot} (${hitter.lineupSource === "official" ? "confirmed" : "projected"})`
+                          : " · lineup pending"}
                       </p>
                     </div>
                     <div className="score-ring" style={ringStyle(hitter.hitIndex, confidenceColor(hitter.confidence))}>

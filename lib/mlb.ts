@@ -1,5 +1,5 @@
 import { buildParlays, calculateHitterProjection, clamp, pitcherWeaknessScore, weatherEnvironmentScore } from "./model";
-import { shiftIsoDate } from "./date";
+import { isoDateInNewYork, shiftIsoDate } from "./date";
 import type { GameProjection, HitterProjection, PitcherSnapshot, SlateResponse, WeatherSnapshot } from "./types";
 
 const MLB_API = "https://statsapi.mlb.com/api/v1";
@@ -225,27 +225,107 @@ async function getTeamRecentHittingStats(teamId: number, date: string): Promise<
   }
 }
 
-async function getLineup(gamePk: number): Promise<Map<number, number>> {
-  const lineup = new Map<number, number>();
-  try {
-    const data = await fetchJson<{
-      teams?: {
-        away?: { players?: Record<string, { person?: { id?: number }; battingOrder?: string }> };
-        home?: { players?: Record<string, { person?: { id?: number }; battingOrder?: string }> };
-      };
-    }>(`${MLB_API}/game/${gamePk}/boxscore`, 30);
+interface BoxscoreSide {
+  team?: { id?: number };
+  players?: Record<string, { person?: { id?: number }; battingOrder?: string }>;
+}
 
-    for (const side of [data.teams?.away, data.teams?.home]) {
-      for (const player of Object.values(side?.players ?? {})) {
-        const playerId = player.person?.id;
-        const battingOrder = Number(player.battingOrder);
-        if (playerId && battingOrder) lineup.set(playerId, Math.ceil(battingOrder / 100));
-      }
-    }
+interface BoxscorePayload {
+  teams?: { away?: BoxscoreSide; home?: BoxscoreSide };
+}
+
+function readBattingOrder(side: BoxscoreSide | undefined, startersOnly: boolean): Map<number, number> {
+  const slots = new Map<number, number>();
+  for (const player of Object.values(side?.players ?? {})) {
+    const playerId = player.person?.id;
+    const order = Number(player.battingOrder);
+    if (!playerId || !Number.isFinite(order) || order <= 0) continue;
+    if (startersOnly && order % 100 !== 0) continue;
+    const slot = Math.floor(order / 100);
+    if (slot < 1 || slot > 9) continue;
+    if (!slots.has(playerId)) slots.set(playerId, slot);
+  }
+  return slots;
+}
+
+async function getOfficialLineups(gamePk: number): Promise<{ away: Map<number, number>; home: Map<number, number> }> {
+  try {
+    const data = await fetchJson<BoxscorePayload>(`${MLB_API}/game/${gamePk}/boxscore`, 30);
+    return {
+      away: readBattingOrder(data.teams?.away, true),
+      home: readBattingOrder(data.teams?.home, true),
+    };
   } catch {
     // Pregame lineups are frequently unavailable until near first pitch.
+    return { away: new Map(), home: new Map() };
   }
-  return lineup;
+}
+
+async function getRecentFinalGamePks(teamId: number, date: string, limit = 3): Promise<number[]> {
+  const params = new URLSearchParams({
+    sportId: "1",
+    teamId: String(teamId),
+    startDate: shiftIsoDate(date, -14),
+    endDate: shiftIsoDate(date, -1),
+    gameTypes: "R",
+  });
+  try {
+    const data = await fetchJson<{ dates?: Array<{ games?: MlbGame[] }> }>(
+      `${MLB_API}/schedule?${params.toString()}`,
+      900,
+    );
+    return (data.dates ?? [])
+      .flatMap((day) => day.games ?? [])
+      .filter((game) => (game.status?.detailedState ?? "").toLowerCase().includes("final"))
+      .sort((a, b) => b.gameDate.localeCompare(a.gameDate))
+      .slice(0, limit)
+      .map((game) => game.gamePk);
+  } catch {
+    return [];
+  }
+}
+
+async function getProjectedLineup(teamId: number, date: string): Promise<Map<number, number>> {
+  const gamePks = await getRecentFinalGamePks(teamId, date);
+  if (!gamePks.length) return new Map();
+
+  const weightBySlot = new Map<number, Map<number, number>>();
+  for (let index = 0; index < gamePks.length; index += 1) {
+    const weight = gamePks.length - index;
+    try {
+      const data = await fetchJson<BoxscorePayload>(`${MLB_API}/game/${gamePks[index]}/boxscore`, 3600);
+      for (const side of [data.teams?.away, data.teams?.home]) {
+        if (side?.team?.id !== teamId) continue;
+        for (const [playerId, slot] of readBattingOrder(side, true)) {
+          const slots = weightBySlot.get(playerId) ?? new Map<number, number>();
+          slots.set(slot, (slots.get(slot) ?? 0) + weight);
+          weightBySlot.set(playerId, slots);
+        }
+      }
+    } catch {
+      // A missing boxscore simply contributes no evidence.
+    }
+  }
+
+  const projected = new Map<number, number>();
+  const used = new Set<number>();
+  for (let slot = 1; slot <= 9; slot += 1) {
+    let bestPlayer: number | undefined;
+    let bestWeight = 0;
+    for (const [playerId, slots] of weightBySlot) {
+      if (used.has(playerId)) continue;
+      const weight = slots.get(slot) ?? 0;
+      if (weight > bestWeight) {
+        bestWeight = weight;
+        bestPlayer = playerId;
+      }
+    }
+    if (bestPlayer != null) {
+      projected.set(bestPlayer, slot);
+      used.add(bestPlayer);
+    }
+  }
+  return projected;
 }
 
 async function getFeaturedOdds(): Promise<Map<string, GameOddsContext>> {
@@ -478,10 +558,11 @@ function buildTeamHitters(input: {
   seasonLines: StatLine[];
   recentLines: StatLine[];
   lineup: Map<number, number>;
+  lineupSource: "official" | "projected" | null;
   staffWeakness: number;
   activeRoster: Set<number>;
 }): HitterProjection[] {
-  const { game, side, seasonLines, recentLines, lineup, staffWeakness, activeRoster } = input;
+  const { game, side, seasonLines, recentLines, lineup, lineupSource, staffWeakness, activeRoster } = input;
   const team = game[side];
   const opponent = side === "away" ? game.home : game.away;
   const recentByPlayer = new Map<number, Record<string, unknown>>();
@@ -523,6 +604,7 @@ function buildTeamHitters(input: {
         gamePk: game.gamePk,
         gameDate: game.gameDate,
         lineupSlot: lineup.get(playerId),
+        lineupSource: lineup.get(playerId) ? lineupSource ?? undefined : undefined,
         batSide: line.person.batSide?.code,
         starterHand: opponent.pitcher.hand,
         starterName: opponent.pitcher.name,
@@ -557,6 +639,7 @@ export async function buildSlate(date: string): Promise<SlateResponse> {
       games: [],
       hitters: [],
       parlays: [],
+      lineupStatus: "none",
       warnings: ["No MLB games are scheduled for this date."],
     };
   }
@@ -566,15 +649,17 @@ export async function buildSlate(date: string): Promise<SlateResponse> {
   const oddsEventByGame = new Map<number, string>();
   let weatherAvailableCount = 0;
   let propMarketCount = 0;
+  let officialLineupCount = 0;
+  let projectedLineupCount = 0;
   const games: GameProjection[] = [];
   const hitters: HitterProjection[] = [];
 
   for (const rawGame of gamesRaw) {
-    const [awayPitcher, homePitcher, weather, lineup] = await Promise.all([
+    const [awayPitcher, homePitcher, weather, officialLineups] = await Promise.all([
       getPitcherSnapshot(rawGame.teams.away.probablePitcher, season),
       getPitcherSnapshot(rawGame.teams.home.probablePitcher, season),
       getWeather(rawGame.venue?.id, rawGame.gameDate),
-      getLineup(rawGame.gamePk),
+      getOfficialLineups(rawGame.gamePk),
     ]);
 
     const marketContext = oddsContext.get(matchupKey(rawGame.teams.away.team.name, rawGame.teams.home.team.name));
@@ -582,6 +667,19 @@ export async function buildSlate(date: string): Promise<SlateResponse> {
     if (weather.available) weatherAvailableCount += 1;
     const game = toGameProjection(rawGame, awayPitcher, homePitcher, weather, marketContext?.marketTotal);
     games.push(game);
+
+    const awayOfficial = officialLineups.away.size >= 8;
+    const homeOfficial = officialLineups.home.size >= 8;
+    const [awayLineup, homeLineup] = await Promise.all([
+      awayOfficial ? Promise.resolve(officialLineups.away) : getProjectedLineup(rawGame.teams.away.team.id, date),
+      homeOfficial ? Promise.resolve(officialLineups.home) : getProjectedLineup(rawGame.teams.home.team.id, date),
+    ]);
+    const awaySource: "official" | "projected" | null = awayOfficial ? "official" : awayLineup.size ? "projected" : null;
+    const homeSource: "official" | "projected" | null = homeOfficial ? "official" : homeLineup.size ? "projected" : null;
+    if (awaySource === "official") officialLineupCount += 1;
+    else if (awaySource === "projected") projectedLineupCount += 1;
+    if (homeSource === "official") officialLineupCount += 1;
+    else if (homeSource === "projected") projectedLineupCount += 1;
 
     const [awaySeason, homeSeason, awayRecent, homeRecent, awayStaff, homeStaff, awayRoster, homeRoster] = await Promise.all([
       getTeamSeasonStats(game.away.id, "hitting", season),
@@ -600,7 +698,8 @@ export async function buildSlate(date: string): Promise<SlateResponse> {
         side: "away",
         seasonLines: awaySeason,
         recentLines: awayRecent,
-        lineup,
+        lineup: awayLineup,
+        lineupSource: awaySource,
         staffWeakness: teamStaffWeakness(homeStaff),
         activeRoster: awayRoster,
       }),
@@ -609,7 +708,8 @@ export async function buildSlate(date: string): Promise<SlateResponse> {
         side: "home",
         seasonLines: homeSeason,
         recentLines: homeRecent,
-        lineup,
+        lineup: homeLineup,
+        lineupSource: homeSource,
         staffWeakness: teamStaffWeakness(awayStaff),
         activeRoster: homeRoster,
       }),
@@ -653,8 +753,21 @@ export async function buildSlate(date: string): Promise<SlateResponse> {
   } else if (!propMarketCount) {
     warnings.push("The odds feed returned no 0.5-hit markets yet. Player props are often posted closer to first pitch.");
   }
-  if (hitters.every((hitter) => !hitter.lineupSlot)) {
-    warnings.push("Official batting orders are not posted yet; expected plate appearances use neutral lineup estimates.");
+  const lineupStatus: SlateResponse["lineupStatus"] =
+    officialLineupCount && projectedLineupCount
+      ? "mixed"
+      : officialLineupCount
+        ? "official"
+        : projectedLineupCount
+          ? "projected"
+          : "none";
+
+  if (lineupStatus === "projected") {
+    warnings.push("Official lineups are not posted yet. Batting orders are projected from each team's recent starts and refresh automatically once real lineups drop.");
+  } else if (lineupStatus === "mixed") {
+    warnings.push("Some teams have posted official lineups. The rest use projected batting orders until theirs drop.");
+  } else if (lineupStatus === "none") {
+    warnings.push("No batting order history was available, so expected plate appearances use neutral lineup estimates.");
   }
 
   return {
@@ -669,8 +782,24 @@ export async function buildSlate(date: string): Promise<SlateResponse> {
     games,
     hitters,
     parlays: buildParlays(hitters),
+    lineupStatus,
     warnings,
   };
+}
+
+export async function resolveSlateDate(): Promise<string> {
+  const today = isoDateInNewYork(0);
+  try {
+    const games = await getSchedule(today);
+    const upcoming = games.some((game) => {
+      const state = (game.status?.detailedState ?? "").toLowerCase();
+      return !state.includes("final") && !state.includes("completed") && !state.includes("postponed");
+    });
+    if (upcoming) return today;
+  } catch {
+    return today;
+  }
+  return isoDateInNewYork(1);
 }
 
 export async function getPlayerHitsForGame(gamePk: number): Promise<Map<number, number>> {

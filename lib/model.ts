@@ -83,6 +83,7 @@ export function calculateHitterProjection(input: {
   gamePk: number;
   gameDate: string;
   lineupSlot?: number;
+  lineupSource?: "official" | "projected";
   batSide?: string;
   starterHand?: string;
   starterName: string;
@@ -134,18 +135,22 @@ export function calculateHitterProjection(input: {
     ),
   );
 
+  // Calibrated against realistic MLB 1+ hit rates: strong bats land near 0.70,
+  // league-average regulars near 0.60. The index is the supporting signal, not the gate.
   const confidence: HitterProjection["confidence"] =
-    hitIndex >= 86 && probability >= 0.7
+    probability >= 0.7 && hitIndex >= 72
       ? "Elite"
-      : hitIndex >= 79 && probability >= 0.64
+      : probability >= 0.655 && hitIndex >= 66
         ? "Strong"
-        : hitIndex >= 72
+        : probability >= 0.6
           ? "Qualified"
           : "Pass";
 
   const explanation = [
     `${Math.round(probability * 100)}% model estimate for 1+ hit`,
-    input.lineupSlot ? `Projected batting slot ${input.lineupSlot} (${expectedPa.toFixed(1)} expected PA)` : `${expectedPa.toFixed(1)} expected PA while lineup is pending`,
+    input.lineupSlot
+      ? `${input.lineupSource === "official" ? "Confirmed" : "Projected"} batting slot ${input.lineupSlot} (${expectedPa.toFixed(1)} expected PA)`
+      : `${expectedPa.toFixed(1)} expected PA while lineup is pending`,
     `Season AVG ${input.seasonAvg.toFixed(3)} · recent AVG ${input.recentAvg.toFixed(3)}`,
     `Opposing starter weakness ${Math.round(input.starterWeakness)}/100`,
   ];
@@ -163,6 +168,7 @@ export function calculateHitterProjection(input: {
     gamePk: input.gamePk,
     gameDate: input.gameDate,
     lineupSlot: input.lineupSlot,
+    lineupSource: input.lineupSource,
     batSide: input.batSide,
     starterHand: input.starterHand,
     starterName: input.starterName,

@@ -50,6 +50,7 @@ export interface HitterProjection {
   gamePk: number;
   gameDate: string;
   lineupSlot?: number;
+  lineupSource?: "official" | "projected";
   batSide?: string;
   starterHand?: string;
   starterName: string;
@@ -104,6 +105,7 @@ export interface SlateResponse {
   games: GameProjection[];
   hitters: HitterProjection[];
   parlays: ParlayProjection[];
+  lineupStatus: "official" | "projected" | "mixed" | "none";
   warnings: string[];
 }
 

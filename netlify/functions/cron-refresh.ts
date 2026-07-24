@@ -8,4 +8,4 @@ export default async (): Promise<Response> => {
   return new Response("triggered");
 };
 
-export const config = { schedule: "0 16 * * *" };
+export const config = { schedule: "0 * * * *" };

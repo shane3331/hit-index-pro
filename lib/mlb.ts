@@ -984,3 +984,77 @@ export async function getPlayerHitsForGame(gamePk: number): Promise<Map<number, 
   }
   return results;
 }
+
+
+export interface LivePlayerHit {
+  playerId: number;
+  hits: number;
+  atBats: number;
+}
+
+export interface LiveGameStatus {
+  gamePk: number;
+  state: "preview" | "live" | "final";
+  detailedState: string;
+  inning?: number;
+  inningHalf?: string;
+  awayScore?: number;
+  homeScore?: number;
+  players: LivePlayerHit[];
+}
+
+/** Live per-game state and each hitter's running hit total, for the in-game bet tracker. */
+export async function getLiveGameStatuses(gamePks: number[]): Promise<LiveGameStatus[]> {
+  const unique = [...new Set(gamePks)].filter((pk) => Number.isFinite(pk));
+  const results = await Promise.all(
+    unique.map(async (gamePk): Promise<LiveGameStatus | null> => {
+      try {
+        const data = await fetchJson<{
+          gameData?: { status?: { abstractGameState?: string; detailedState?: string } };
+          liveData?: {
+            linescore?: {
+              currentInning?: number;
+              inningHalf?: string;
+              teams?: { away?: { runs?: number }; home?: { runs?: number } };
+            };
+            boxscore?: {
+              teams?: {
+                away?: { players?: Record<string, { person?: { id?: number }; stats?: { batting?: { hits?: number; atBats?: number } } }> };
+                home?: { players?: Record<string, { person?: { id?: number }; stats?: { batting?: { hits?: number; atBats?: number } } }> };
+              };
+            };
+          };
+        }>(`${MLB_LIVE}/game/${gamePk}/feed/live`, 20);
+
+        const abstract = (data.gameData?.status?.abstractGameState ?? "").toLowerCase();
+        const state: LiveGameStatus["state"] =
+          abstract === "live" ? "live" : abstract === "final" ? "final" : "preview";
+
+        const players: LivePlayerHit[] = [];
+        for (const side of [data.liveData?.boxscore?.teams?.away, data.liveData?.boxscore?.teams?.home]) {
+          for (const player of Object.values(side?.players ?? {})) {
+            const id = player.person?.id;
+            if (!id) continue;
+            const batting = player.stats?.batting;
+            if (!batting) continue;
+            players.push({ playerId: id, hits: batting.hits ?? 0, atBats: batting.atBats ?? 0 });
+          }
+        }
+
+        return {
+          gamePk,
+          state,
+          detailedState: data.gameData?.status?.detailedState ?? "",
+          inning: data.liveData?.linescore?.currentInning,
+          inningHalf: data.liveData?.linescore?.inningHalf,
+          awayScore: data.liveData?.linescore?.teams?.away?.runs,
+          homeScore: data.liveData?.linescore?.teams?.home?.runs,
+          players,
+        };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return results.filter((row): row is LiveGameStatus => row !== null);
+}

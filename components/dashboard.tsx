@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { HistoryResponse, HitterProjection, ParlayProjection, SlateResponse } from "@/lib/types";
+import { BetTracker } from "@/components/bet-tracker";
 
 type Mode = "conservative" | "balanced" | "aggressive";
 
@@ -24,6 +25,7 @@ const NAV_SECTIONS = [
   { id: "games", label: "Games and Starters" },
   { id: "hitters", label: "Hit Index Board" },
   { id: "parlays", label: "Parlay Builder" },
+  { id: "tracker", label: "Live Bet Tracker" },
   { id: "history", label: "Track Record" },
   { id: "model", label: "Model Logic" },
 ];
@@ -534,6 +536,10 @@ export function Dashboard({ initialDate }: { initialDate: string }) {
               </div>
             ))}
           </div>
+        </section>
+
+        <section id="tracker" className="section-block">
+          <BetTracker slate={slate} />
         </section>
 
         <section id="history" className="section-block">

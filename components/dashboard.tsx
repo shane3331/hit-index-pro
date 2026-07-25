@@ -5,6 +5,8 @@ import type { HistoryResponse, HitterProjection, ParlayProjection, SlateResponse
 
 type Mode = "conservative" | "balanced" | "aggressive";
 
+const MONO = '"DM Mono", ui-monospace, SFMono-Regular, monospace';
+
 const MODE_LABELS: Record<Mode, string> = {
   conservative: "Conservative",
   balanced: "Balanced",
@@ -77,6 +79,7 @@ function gameTime(iso: string): string {
 export function Dashboard({ initialDate }: { initialDate: string }) {
   const [date, setDate] = useState(initialDate);
   const [mode, setMode] = useState<Mode>("balanced");
+  const [sortBy, setSortBy] = useState<"rank" | "time">("rank");
   const [slate, setSlate] = useState<SlateResponse | null>(null);
   const [history, setHistory] = useState<HistoryResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -133,14 +136,24 @@ export function Dashboard({ initialDate }: { initialDate: string }) {
       .catch(() => setHistory({ enabled: false }));
   }, []);
 
-  const qualifiedHitters = useMemo(
-    () => (slate?.hitters ?? []).filter((hitter) => hitterPasses(hitter, mode)).slice(0, 25),
-    [slate, mode],
-  );
-  const qualifiedParlays = useMemo(
-    () => (slate?.parlays ?? []).filter((parlay) => parlayPasses(parlay, mode)).slice(0, 10),
-    [slate, mode],
-  );
+  const qualifiedHitters = useMemo(() => {
+    const list = (slate?.hitters ?? []).filter((hitter) => hitterPasses(hitter, mode));
+    if (sortBy === "time") {
+      // Earliest first pitch first; within a game the stronger hitter stays on top.
+      list.sort((a, b) => a.gameDate.localeCompare(b.gameDate) || b.hitIndex - a.hitIndex);
+    }
+    return list.slice(0, 25);
+  }, [slate, mode, sortBy]);
+
+  const qualifiedParlays = useMemo(() => {
+    const list = (slate?.parlays ?? []).filter((parlay) => parlayPasses(parlay, mode));
+    if (sortBy === "time") {
+      const earliest = (parlay: ParlayProjection) =>
+        parlay.legs.map((leg) => leg.gameDate).sort()[0] ?? "";
+      list.sort((a, b) => earliest(a).localeCompare(earliest(b)) || b.parlayIndex - a.parlayIndex);
+    }
+    return list.slice(0, 10);
+  }, [slate, mode, sortBy]);
   const eliteCount = useMemo(() => (slate?.hitters ?? []).filter((hitter) => hitter.confidence === "Elite").length, [slate]);
   const topAverage = useMemo(() => {
     const top = (slate?.hitters ?? []).slice(0, 10);
@@ -197,6 +210,10 @@ export function Dashboard({ initialDate }: { initialDate: string }) {
               {(Object.keys(MODE_LABELS) as Mode[]).map((key) => (
                 <option key={key} value={key}>{MODE_LABELS[key]}</option>
               ))}
+            </select>
+            <select value={sortBy} onChange={(event) => setSortBy(event.target.value as "rank" | "time")} aria-label="Sort order">
+              <option value="rank">Sort: Strongest</option>
+              <option value="time">Sort: Game Time</option>
             </select>
             <button type="button" className="refresh-button" disabled={loading || building} onClick={() => loadSlate(date, true)}>
               {loading || building ? "Building..." : "Refresh"}
@@ -363,7 +380,10 @@ export function Dashboard({ initialDate }: { initialDate: string }) {
                 <div>
                   <div className="hitter-title-row">
                     <div>
-                      <div className="micro-label" style={{ color: confidenceColor(hitter.confidence) }}>{hitter.confidence}</div>
+                      <div className="micro-label" style={{ color: confidenceColor(hitter.confidence) }}>
+                        {hitter.confidence}
+                        <span style={{ color: "var(--muted-2)", marginLeft: 8 }}>{gameTime(hitter.gameDate)}</span>
+                      </div>
                       <h3>{hitter.name}</h3>
                       <p>
                         {hitter.team} vs {hitter.opponent} · faces {hitter.starterName}
@@ -403,6 +423,57 @@ export function Dashboard({ initialDate }: { initialDate: string }) {
                       </div>
                     ))}
                   </div>
+                  {hitter.recentGames?.length ? (
+                    <div style={{ marginTop: 14 }}>
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "baseline",
+                          fontFamily: MONO,
+                          fontSize: 10,
+                          letterSpacing: "0.12em",
+                          textTransform: "uppercase",
+                          color: "var(--muted-2)",
+                          marginBottom: 7,
+                        }}
+                      >
+                        <span>Last {hitter.recentGames.length} Games</span>
+                        <span style={{ color: hitter.recentForm.hitRate >= 0.6 ? "var(--acid)" : "var(--muted-2)" }}>
+                          {hitter.recentForm.gamesWithHit}/{hitter.recentForm.games} with a hit
+                          {" · "}
+                          {hitter.recentForm.hits} total
+                        </span>
+                      </div>
+                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                        {[...hitter.recentGames].reverse().map((game) => (
+                          <div
+                            key={game.date}
+                            title={`${game.date}: ${game.hits} hit${game.hits === 1 ? "" : "s"} in ${game.atBats} AB`}
+                            style={{
+                              minWidth: 30,
+                              flex: "1 1 30px",
+                              textAlign: "center",
+                              padding: "6px 0 5px",
+                              borderRadius: 6,
+                              fontFamily: MONO,
+                              fontSize: 12,
+                              fontWeight: 600,
+                              lineHeight: 1,
+                              border: "1px solid rgba(255,255,255,.09)",
+                              background: game.hits > 0 ? "rgba(183,255,99,.13)" : "rgba(255,255,255,.03)",
+                              color: game.hits > 0 ? "var(--acid)" : "var(--muted-2)",
+                            }}
+                          >
+                            {game.hits}
+                            <span style={{ display: "block", fontSize: 8, opacity: 0.6, marginTop: 3, fontWeight: 400 }}>
+                              {game.date.slice(5).replace("-", "/")}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                   <p className="parlay-note">{hitter.explanation.join(" · ")}</p>
                 </div>
               </div>
@@ -429,7 +500,12 @@ export function Dashboard({ initialDate }: { initialDate: string }) {
               <div key={parlay.id} className="panel parlay-card">
                 <div className="parlay-head">
                   <div>
-                    <div className="micro-label">{parlay.sameGame ? "Same Game" : "Cross Game"} · Rank {index + 1}</div>
+                    <div className="micro-label">
+                      {parlay.sameGame ? "Same Game" : "Cross Game"}
+                      <span style={{ color: "var(--muted-2)", marginLeft: 8 }}>
+                        {gameTime([...parlay.legs].map((leg) => leg.gameDate).sort()[0])}
+                      </span>
+                    </div>
                     <h3>{parlay.legs[0].name} + {parlay.legs[1].name}</h3>
                   </div>
                   <div className="score-ring score-ring-small" style={ringStyle(parlay.parlayIndex)}>

@@ -1,5 +1,18 @@
 export type DataStatus = "live" | "partial" | "unavailable";
 
+export interface RecentGameLine {
+  date: string;
+  hits: number;
+  atBats: number;
+}
+
+export interface RecentFormSummary {
+  games: number;
+  hits: number;
+  gamesWithHit: number;
+  hitRate: number;
+}
+
 export interface PitcherSnapshot {
   id?: number;
   name: string;
@@ -76,6 +89,8 @@ export interface HitterProjection {
     staff: number;
   };
   explanation: string[];
+  recentGames: RecentGameLine[];
+  recentForm: RecentFormSummary;
   market?: PropMarketSnapshot;
   marketEdge?: number;
 }

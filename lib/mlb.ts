@@ -1,6 +1,6 @@
 import { buildParlays, calculateHitterProjection, clamp, pitcherWeaknessScore, weatherEnvironmentScore } from "./model";
 import { isoDateInNewYork, shiftIsoDate } from "./date";
-import type { GameProjection, HitterProjection, PitcherSnapshot, SlateResponse, WeatherSnapshot } from "./types";
+import type { RecentGameLine, GameProjection, HitterProjection, PitcherSnapshot, SlateResponse, WeatherSnapshot } from "./types";
 
 const MLB_API = "https://statsapi.mlb.com/api/v1";
 const MLB_LIVE = "https://statsapi.mlb.com/api/v1.1";
@@ -302,7 +302,14 @@ async function getTeamRecentHittingStats(teamId: number, date: string): Promise<
 
 interface BoxscoreSide {
   team?: { id?: number };
-  players?: Record<string, { person?: { id?: number }; battingOrder?: string }>;
+  players?: Record<
+    string,
+    {
+      person?: { id?: number };
+      battingOrder?: string;
+      stats?: { batting?: { hits?: number; atBats?: number } };
+    }
+  >;
 }
 
 interface BoxscorePayload {
@@ -336,13 +343,17 @@ async function getOfficialLineups(gamePk: number): Promise<{ away: Map<number, n
   }
 }
 
-async function getRecentFinalGamePks(teamId: number, date: string, limit = 3): Promise<number[]> {
+async function getRecentFinalGames(
+  teamId: number,
+  date: string,
+  limit: number,
+): Promise<Array<{ gamePk: number; date: string }>> {
   const params = new URLSearchParams({
     sportId: "1",
     teamId: String(teamId),
-    startDate: shiftIsoDate(date, -14),
+    startDate: shiftIsoDate(date, -30),
     endDate: shiftIsoDate(date, -1),
-    gameTypes: "R",
+    gameType: "R",
   });
   try {
     const data = await fetchJson<{ dates?: Array<{ games?: MlbGame[] }> }>(
@@ -354,35 +365,75 @@ async function getRecentFinalGamePks(teamId: number, date: string, limit = 3): P
       .filter((game) => (game.status?.detailedState ?? "").toLowerCase().includes("final"))
       .sort((a, b) => b.gameDate.localeCompare(a.gameDate))
       .slice(0, limit)
-      .map((game) => game.gamePk);
+      .map((game) => ({ gamePk: game.gamePk, date: game.gameDate.slice(0, 10) }));
   } catch {
     return [];
   }
 }
 
-async function getProjectedLineup(teamId: number, date: string): Promise<Map<number, number>> {
-  const gamePks = await getRecentFinalGamePks(teamId, date);
-  if (!gamePks.length) return new Map();
+const RECENT_GAME_WINDOW = 10;
+const LINEUP_EVIDENCE_GAMES = 3;
+const BOXSCORE_FIELDS =
+  "fields=teams,away,home,team,id,players,person,id,battingOrder,stats,batting,hits,atBats";
 
+interface TeamRecentForm {
+  lineup: Map<number, number>;
+  hitLog: Map<number, RecentGameLine[]>;
+}
+
+/**
+ * One pass over a team's recent finals. The newest few games drive the projected batting
+ * order; all of them build each hitter's game-by-game hit log.
+ */
+async function getTeamRecentForm(teamId: number, date: string): Promise<TeamRecentForm> {
+  const games = await getRecentFinalGames(teamId, date, RECENT_GAME_WINDOW);
   const weightBySlot = new Map<number, Map<number, number>>();
-  for (let index = 0; index < gamePks.length; index += 1) {
-    const weight = gamePks.length - index;
-    try {
-      const data = await fetchJson<BoxscorePayload>(`${MLB_API}/game/${gamePks[index]}/boxscore`, 3600);
-      for (const side of [data.teams?.away, data.teams?.home]) {
-        if (side?.team?.id !== teamId) continue;
-        for (const [playerId, slot] of readBattingOrder(side, true)) {
+  const hitLog = new Map<number, RecentGameLine[]>();
+  if (!games.length) return { lineup: new Map(), hitLog };
+
+  const boxscores = await Promise.all(
+    games.map((game) =>
+      fetchJson<BoxscorePayload>(`${MLB_API}/game/${game.gamePk}/boxscore?${BOXSCORE_FIELDS}`, 3600).catch(
+        () => null,
+      ),
+    ),
+  );
+
+  boxscores.forEach((data, index) => {
+    if (!data) return;
+    for (const side of [data.teams?.away, data.teams?.home]) {
+      if (side?.team?.id !== teamId) continue;
+      for (const player of Object.values(side?.players ?? {})) {
+        const playerId = player.person?.id;
+        if (!playerId) continue;
+
+        const batting = player.stats?.batting;
+        if (batting && (batting.atBats != null || batting.hits != null)) {
+          const log = hitLog.get(playerId) ?? [];
+          log.push({
+            date: games[index].date,
+            hits: numberValue(batting.hits, 0),
+            atBats: numberValue(batting.atBats, 0),
+          });
+          hitLog.set(playerId, log);
+        }
+
+        if (index < LINEUP_EVIDENCE_GAMES) {
+          const order = Number(player.battingOrder);
+          if (!Number.isFinite(order) || order <= 0 || order % 100 !== 0) continue;
+          const slot = Math.floor(order / 100);
+          if (slot < 1 || slot > 9) continue;
           const slots = weightBySlot.get(playerId) ?? new Map<number, number>();
-          slots.set(slot, (slots.get(slot) ?? 0) + weight);
+          slots.set(slot, (slots.get(slot) ?? 0) + (LINEUP_EVIDENCE_GAMES - index));
           weightBySlot.set(playerId, slots);
         }
       }
-    } catch {
-      // A missing boxscore simply contributes no evidence.
     }
-  }
+  });
 
-  const projected = new Map<number, number>();
+  for (const log of hitLog.values()) log.sort((a, b) => b.date.localeCompare(a.date));
+
+  const lineup = new Map<number, number>();
   const used = new Set<number>();
   for (let slot = 1; slot <= 9; slot += 1) {
     let bestPlayer: number | undefined;
@@ -396,11 +447,12 @@ async function getProjectedLineup(teamId: number, date: string): Promise<Map<num
       }
     }
     if (bestPlayer != null) {
-      projected.set(bestPlayer, slot);
+      lineup.set(bestPlayer, slot);
       used.add(bestPlayer);
     }
   }
-  return projected;
+
+  return { lineup, hitLog };
 }
 
 async function getFeaturedOdds(): Promise<Map<string, GameOddsContext>> {
@@ -634,11 +686,12 @@ function buildTeamHitters(input: {
   recentLines: StatLine[];
   lineup: Map<number, number>;
   lineupSource: "official" | "projected" | null;
+  hitLog: Map<number, RecentGameLine[]>;
   staffWeakness: number;
   activeRoster: Set<number>;
   debug: { seasonLines: number; droppedByRoster: number; droppedByThreshold: number };
 }): HitterProjection[] {
-  const { game, side, seasonLines, recentLines, lineup, lineupSource, staffWeakness, activeRoster, debug } = input;
+  const { game, side, seasonLines, recentLines, lineup, lineupSource, hitLog, staffWeakness, activeRoster, debug } = input;
   debug.seasonLines += seasonLines.length;
   const team = game[side];
   const opponent = side === "away" ? game.home : game.away;
@@ -701,6 +754,7 @@ function buildTeamHitters(input: {
         starterWeakness,
         environment: game.environmentScore,
         staffWeakness,
+        recentGames: (hitLog.get(playerId) ?? []).slice(0, 10),
       });
     })
     .filter((value): value is HitterProjection => Boolean(value));
@@ -755,10 +809,12 @@ export async function buildSlate(date: string): Promise<SlateResponse> {
 
     const awayOfficial = officialLineups.away.size >= 8;
     const homeOfficial = officialLineups.home.size >= 8;
-    const [awayLineup, homeLineup] = await Promise.all([
-      awayOfficial ? Promise.resolve(officialLineups.away) : getProjectedLineup(rawGame.teams.away.team.id, date),
-      homeOfficial ? Promise.resolve(officialLineups.home) : getProjectedLineup(rawGame.teams.home.team.id, date),
+    const [awayForm, homeForm] = await Promise.all([
+      getTeamRecentForm(rawGame.teams.away.team.id, date),
+      getTeamRecentForm(rawGame.teams.home.team.id, date),
     ]);
+    const awayLineup = awayOfficial ? officialLineups.away : awayForm.lineup;
+    const homeLineup = homeOfficial ? officialLineups.home : homeForm.lineup;
     const awaySource: "official" | "projected" | null = awayOfficial ? "official" : awayLineup.size ? "projected" : null;
     const homeSource: "official" | "projected" | null = homeOfficial ? "official" : homeLineup.size ? "projected" : null;
     if (awaySource === "official") officialLineupCount += 1;
@@ -788,6 +844,7 @@ export async function buildSlate(date: string): Promise<SlateResponse> {
         recentLines: awayRecent,
         lineup: awayLineup,
         lineupSource: awaySource,
+        hitLog: awayForm.hitLog,
         staffWeakness: teamStaffWeakness(homeStaff),
         activeRoster: awayRoster,
         debug: hitterDebug,
@@ -799,6 +856,7 @@ export async function buildSlate(date: string): Promise<SlateResponse> {
         recentLines: homeRecent,
         lineup: homeLineup,
         lineupSource: homeSource,
+        hitLog: homeForm.hitLog,
         staffWeakness: teamStaffWeakness(awayStaff),
         activeRoster: homeRoster,
         debug: hitterDebug,

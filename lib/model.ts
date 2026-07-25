@@ -1,4 +1,4 @@
-import type { HitterProjection, ParlayProjection } from "./types";
+import type { HitterProjection, ParlayProjection, RecentGameLine } from "./types";
 
 export const clamp = (value: number, minimum: number, maximum: number) =>
   Math.min(maximum, Math.max(minimum, value));
@@ -97,7 +97,17 @@ export function calculateHitterProjection(input: {
   starterWeakness: number;
   environment: number;
   staffWeakness: number;
+  recentGames?: RecentGameLine[];
 }): HitterProjection {
+  const recentGames = (input.recentGames ?? []).slice(0, 10);
+  const last10 = {
+    games: recentGames.length,
+    hits: recentGames.reduce((total, game) => total + game.hits, 0),
+    gamesWithHit: recentGames.filter((game) => game.hits > 0).length,
+    hitRate: recentGames.length
+      ? recentGames.filter((game) => game.hits > 0).length / recentGames.length
+      : 0,
+  };
   const expectedPa = expectedPlateAppearances(input.lineupSlot);
   const contactScore = clamp((input.seasonAvg - 0.19) * 235 + (0.24 - input.strikeoutRate) * 85 + 46, 10, 96);
   const recentForm = clamp((input.recentAvg - 0.18) * 220 + 48, 10, 96);
@@ -158,6 +168,9 @@ export function calculateHitterProjection(input: {
   if (platoon >= 58) explanation.push("Favorable or switch-hitter platoon setup");
   if (input.environment >= 60) explanation.push("Above-average run and contact environment");
   if (input.strikeoutRate <= 0.19) explanation.push("Low strikeout profile keeps more balls in play");
+  if (last10.games >= 5) {
+    explanation.push(`Hit safely in ${last10.gamesWithHit} of last ${last10.games} games`);
+  }
 
   return {
     playerId: input.playerId,
@@ -194,6 +207,8 @@ export function calculateHitterProjection(input: {
       staff: Math.round(input.staffWeakness),
     },
     explanation,
+    recentGames,
+    recentForm: last10,
   };
 }
 
